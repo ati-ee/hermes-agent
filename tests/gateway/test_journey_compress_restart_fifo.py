@@ -21,6 +21,7 @@ from tests.gateway.fixtures.local_recovery_probe import child_env, daemon, rpc, 
 from tests.waiting import async_wait_until
 
 FOLLOWERS = ('FOLLOWER_1', 'FOLLOWER_2', 'FOLLOWER_3')
+HISTORY_FILLER = ' '.join(f'historical-detail-{i:04d}' for i in range(767))
 
 
 class CompactingModel(BaseHTTPRequestHandler):
@@ -44,9 +45,14 @@ class CompactingModel(BaseHTTPRequestHandler):
         if body.get('model') == 'original' and 'SUMMARY_RETAINED_FACTS' in wire and not self.server.blocked.is_set():
             self.server.blocked.set()
             self.server.release.wait(60)
-        # Only the pressure turns are large: the followers must not trigger a second compaction.
+        # Only the pressure turns are large: the followers must not trigger a second compaction. The
+        # protected tail is token-bounded (lean tail_token_budget, protect_last_n is only a count floor),
+        # so each reply is sized for that budget: the preflight of PRESSURE_3 (not PRESSURE_2) compacts,
+        # its tail holds PRESSURE_2 onward and PRESSURE_1 lands in the compactable middle, while every
+        # request sent before the compaction stays under the overflow reply above. The filler is
+        # distinct text: a reply this long made of one repeated phrase is cut as a repetition loop.
         reply = 'SUMMARY_RETAINED_FACTS' if body.get('model') == 'summary' else (
-            'ACK_' + str(text)[:40] + (' ' + 'historical detail ' * 700 if str(text).startswith('PRESSURE_') else ''))
+            'ACK_' + str(text)[:40] + (' ' + HISTORY_FILLER if str(text).startswith('PRESSURE_') else ''))
         message = {'role': 'assistant', 'content': reply}
         payload = json.dumps({'id': 'local', 'model': body.get('model'), 'choices': [
             {'index': 0, 'message': message, 'finish_reason': 'stop'}],
@@ -194,11 +200,15 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         order = [r['text'] for r in peer.requests if r['model'] == 'original' and r['text'] in FOLLOWERS]
         assert order == list(FOLLOWERS), order
         assert executed(compacting['text'][:12]) == before['compacting_requests'], 'compacted turn replayed'
+        # Precondition of the wire check below: the committed compaction really summarized PRESSURE_1.
+        assert not any(str(c).startswith('PRESSURE_1 ') for _, _, c in before['compacted']), before['compacted']
         for name in FOLLOWERS:
             wire = next(r['wire'] for r in peer.requests if r['text'] == name)
             # protect_first_n keeps PRESSURE_0 verbatim; the compacted middle is only inside the summary.
             turns = [str(m.get('content', '')) for m in json.loads(wire)]
             assert 'SUMMARY_RETAINED_FACTS' in wire and not any(t.startswith('PRESSURE_1 ') for t in turns), name
+            assert any(t.startswith('PRESSURE_0 ') for t in turns), name
+            assert all(any(t.startswith(f'PRESSURE_{i} ') for t in turns) for i in (2, 3)), name
         settled = admissions()
         assert {r['target_session_id'] for r in settled} == {sid}
         assert [r['request_id'] for r in settled][-3:] == list(FOLLOWERS)
