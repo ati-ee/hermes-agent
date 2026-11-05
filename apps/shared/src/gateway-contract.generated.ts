@@ -5402,6 +5402,60 @@ export interface CanonicalBotCancelResult {
   status: 'cancelled' | 'stopping' | 'finished'
   receipt_status: string
 }
+/** The same keys a machine ``prompt.submit`` of plain text sends (no attachments: capturing them writes media). ``input_id`` is the exact original request id the submit will carry. */
+export interface PromptPrepareInputParams {
+  session_id: string
+  input_id: string
+  text: string
+  finite?: boolean
+  unattended?: boolean
+  idle_fence?: CanonicalIdleFence | null
+}
+/** What the owner WOULD commit for those params, computed without writing. Persist it before the submit; ``prompt.lookup_input`` later compares against it. */
+export interface PreparedInputBinding {
+  version: 'original-input-lookup-v1'
+  ref: CanonicalSessionRef
+  input_id: string
+  principal_binding: string
+  payload_fingerprint: string
+  idle_fence: OriginalInputFence | null
+}
+/** The accepted ``idle-admission-v1`` fence committed with the admission (``idle_fence_v1``). */
+export interface OriginalInputFence {
+  expected_generation: number
+}
+export interface PromptLookupInputParams {
+  session_id: string
+  input_id: string
+  payload_fingerprint: string
+  idle_fence?: CanonicalIdleFence | null
+}
+/** ``found``: an admission holds (this principal, session, ``input_id``); ``binding`` says whether its committed fingerprint AND fence equal the expected ones (``admission``/``proof`` only on ``exact``). ``not_found``: nothing at that exact key NOW, never proof a submit was refused. ``unavailable`` (``reason``): retired/draining/superseded owner or storage failure; proves nothing. */
+export interface PromptLookupInputResult {
+  version: 'original-input-lookup-v1'
+  state: 'found' | 'not_found' | 'unavailable'
+  reason: 'runtime_retired' | 'runtime_draining' | 'stale_epoch' | 'storage_unavailable' | null
+  ref: CanonicalSessionRef
+  input_id: string
+  principal_binding: string
+  binding: 'exact' | 'mismatch' | null
+  admission: OriginalInputAdmission | null
+  proof: OriginalInputProof | null
+  settled: boolean
+}
+/** ``AdmissionStatus`` without the ref (the envelope carries it). A committed settlement whose completion is not yet published reads ``started``: ``terminal`` is settled-owner evidence only. */
+export interface OriginalInputAdmission {
+  admission_id: string
+  sequence: number
+  status: 'queued' | 'started' | 'unknown' | 'terminal'
+  outcome: string | null
+  authority_epoch: number
+  execution_generation: number | null
+}
+export interface OriginalInputProof {
+  payload_fingerprint: string
+  idle_fence: OriginalInputFence | null
+}
 /** ``answers`` rides only on a reconnect replay (locks the server already accepted; null = skipped). */
 export interface ClarifyRequestParams {
   session_id: string
@@ -6921,6 +6975,10 @@ export interface CanonicalRpcMethods {
   'profiles.list': { params: CanonicalProfilesParams; result: CanonicalProfilesResult }
   /** Retire a queued admission; a started one is interrupted in the same call. */
   'prompt.cancel': { params: PromptCancelParams; result: AdmissionStatus }
+  /** original-input-lookup-v1: read-only lookup of the caller's own admission at its exact original input_id; no prefix/trim/alias, no other principal, no write. not_found never proves a refusal. */
+  'prompt.lookup_input': { params: PromptLookupInputParams; result: PromptLookupInputResult }
+  /** original-input-lookup-v1: the binding (opaque principal, payload fingerprint, fence) the same prompt.submit params would commit, computed without writing. Needs a session live in this owner; no attach. Refusals: not_found, permission_denied, unsupported_control, invalid_params. */
+  'prompt.prepare_input': { params: PromptPrepareInputParams; result: PreparedInputBinding }
   /** Current receipt of one admission the caller submitted (or controls). */
   'prompt.receipt': { params: PromptReceiptParams; result: PromptReceiptResult }
   /** Cancel a still-queued admission and admit the edited prompt as a new admission at the back of the FIFO, in one write bound to the replaced admission. Refusals: admission_started, admission_conflict (the submission_id replaced another admission), queue_full, unsupported_control, not_found. */
@@ -6990,6 +7048,8 @@ export const CANONICAL_RPC_METHODS = [
   'kanban.run',
   'profiles.list',
   'prompt.cancel',
+  'prompt.lookup_input',
+  'prompt.prepare_input',
   'prompt.receipt',
   'prompt.replace_queued',
   'prompt.resolve_unknown',

@@ -96,6 +96,45 @@ stay queued. Their delivery waiters are released with the pause reason instead o
 adapter loop. `/reset` rotates the route to a new session (the lost turn and its followers stay
 on the old one); the operator can alternatively resolve the unknown row from Desktop or the CLI.
 
+### Original-input lookup after a lost submit reply (`original-input-lookup-v1`)
+
+A machine client whose `prompt.submit` reply was lost (the transport dropped before the ACK) has
+no `admission_id`, so `prompt.receipt` cannot answer it, and replaying the submit is an
+admission-capable write. `runtime.describe` advertises `original-input-lookup-v1` for two
+read-only verbs (`gateway/session_input_lookup.py`, contract
+`tui_gateway/contracts/canonical_input_lookup.py`):
+
+- `prompt.prepare_input` (`session:submit`; params `session_id`, `input_id`, `text`, `finite`,
+  `unattended`, optional `idle_fence`) returns the binding the same `prompt.submit` params WOULD
+  commit: `principal_binding` (an opaque SHA-256 of the profile and the authenticated subject),
+  `payload_fingerprint` (exactly the committed `payload_digest`, from the payload construction and
+  digest the submit itself uses) and the accepted `idle_fence`. It needs the session live in this
+  owner, never attaches or restores, and refuses attachments (capturing them writes media). The
+  client persists the binding, then submits with the identical params.
+- `prompt.lookup_input` (`session:submit`; params `session_id`, `input_id`,
+  `payload_fingerprint`, optional `idle_fence`) reads the admission at the exact durable key
+  (authenticated subject, session, `input_id`). The answer is a versioned envelope: `state`
+  `found` / `not_found` / `unavailable`. A `found` row is `binding: exact` only when both the
+  committed fingerprint and the committed fence equal the expected ones; only then does it carry
+  `admission` (id, sequence, status, outcome, authority epoch, execution generation) and `proof`.
+  Prompt text, messages, results, usage and provider settings are never included.
+
+Both verbs are pure. They open no write transaction, admit, schedule, restore, mount, adopt a
+compression catch-up, attach or create a session. The principal comes only from the
+authenticated connection: params cannot name one (the contract is closed), a profile-bound grant
+cannot reach another profile, and `session:control` never widens the lookup to another
+principal. The `input_id` match is exact, with no trimming, prefix or case folding. The read
+checks the store's owner epoch in the same SQLite statement. A retired, retiring or superseded
+owner, or a storage failure, answers `unavailable`, which proves nothing. A committed settlement
+whose completion is not yet published still reads as its `started` claim, so `settled: true`
+(status `terminal`) is evidence from the settled current owner only. After an owner restart the
+durable row answers through the new owner without restoring the session; a turn lost across the
+restart reads `unknown`.
+
+`not_found` means only that nothing holds that exact key now. It is never proof that the submit
+was refused, and clients must not unlock, resubmit or mint a new key because of it. The owner has
+no durable refusal ledger: typed pre-admission refusals roll back and leave no row.
+
 ## Shared authority prompt attachments
 
 `prompt.submit` accepts an optional `attachments: [{path, mime}]` list beside `text`.

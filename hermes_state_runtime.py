@@ -148,7 +148,7 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
         request_id=request_id, payload=payload, intent=intent)
     if retired is not None:
         return retired
-    digest = admission_fingerprint(canonical_target=session_id, payload={'input': json.loads(encoded), 'intent': intent})
+    digest = admission_digest(session_id, payload, intent)
     def write(conn):
         _epoch(conn, epoch)
         _session(conn, session_id)
@@ -189,6 +189,32 @@ def find_session_admission(db, *, principal_id: str, session_id: str, request_id
     with db._read_ctx() as conn:
         return _row(conn.execute('SELECT * FROM session_admissions WHERE principal_id=? AND target_session_id=? '
                                  'AND request_id=?', (principal_id, session_id, request_id)).fetchone())
+
+
+def admission_digest(session_id: str, payload: dict, intent: str = 'queue') -> str:
+    """The committed ``payload_digest`` of *payload* admitted to *session_id*: the one canonicalization
+    ``admit_session_input`` stores and ``original-input-lookup-v1``'s prepared binding returns."""
+    return admission_fingerprint(canonical_target=session_id,
+                                 payload={'input': json.loads(_json(payload)), 'intent': intent})
+
+
+def find_input_binding(db, *, epoch: int, principal_id: str, session_id: str, request_id: str) -> dict | None:
+    """``original-input-lookup-v1``'s pure read: ``find_session_admission``'s exact tuple plus its
+    committed ``payload_digest``. ONE statement (one snapshot) also reads the store's owner epoch:
+    ``stale_epoch`` unless it is still *epoch* (a superseded owner's view proves nothing)."""
+    for value in (principal_id, session_id, request_id):
+        _text(value)
+    with db._read_ctx() as conn:
+        row = conn.execute('SELECT (SELECT epoch FROM runtime_epoch WHERE singleton=1) AS store_epoch, a.* '
+                           'FROM (SELECT 1) LEFT JOIN session_admissions a ON a.principal_id=? '
+                           'AND a.target_session_id=? AND a.request_id=?',
+                           (principal_id, session_id, request_id)).fetchone()
+    if type(epoch) is not int or row['store_epoch'] != epoch:
+        raise RuntimeStoreError('stale_epoch')
+    if row['admission_id'] is None:
+        return None
+    found = {key: row[key] for key in row.keys() if key != 'store_epoch'}
+    return {**_row(found), 'payload_digest': found['payload_digest']}
 
 
 def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -> list[dict]:

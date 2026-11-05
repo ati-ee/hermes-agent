@@ -25367,6 +25367,106 @@
         "title": "OptionalProjectResult",
         "type": "object"
       },
+      "OriginalInputAdmission": {
+        "additionalProperties": false,
+        "description": "``AdmissionStatus`` without the ref (the envelope carries it). A committed settlement whose\ncompletion is not yet published reads ``started``: ``terminal`` is settled-owner evidence only.",
+        "properties": {
+          "admission_id": {
+            "title": "Admission Id",
+            "type": "string"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "started",
+              "unknown",
+              "terminal"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "authority_epoch": {
+            "title": "Authority Epoch",
+            "type": "integer"
+          },
+          "execution_generation": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution Generation"
+          }
+        },
+        "required": [
+          "admission_id",
+          "sequence",
+          "status",
+          "outcome",
+          "authority_epoch",
+          "execution_generation"
+        ],
+        "title": "OriginalInputAdmission",
+        "type": "object"
+      },
+      "OriginalInputFence": {
+        "additionalProperties": false,
+        "description": "The accepted ``idle-admission-v1`` fence committed with the admission (``idle_fence_v1``).",
+        "properties": {
+          "expected_generation": {
+            "title": "Expected Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_generation"
+        ],
+        "title": "OriginalInputFence",
+        "type": "object"
+      },
+      "OriginalInputProof": {
+        "additionalProperties": false,
+        "properties": {
+          "payload_fingerprint": {
+            "title": "Payload Fingerprint",
+            "type": "string"
+          },
+          "idle_fence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OriginalInputFence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "payload_fingerprint",
+          "idle_fence"
+        ],
+        "title": "OriginalInputProof",
+        "type": "object"
+      },
       "PaneRevealPayload": {
         "additionalProperties": true,
         "description": "``tools/focus_pane_tool.py``.",
@@ -28778,6 +28878,52 @@
           }
         },
         "title": "PluginsManageResult",
+        "type": "object"
+      },
+      "PreparedInputBinding": {
+        "additionalProperties": false,
+        "description": "What the owner WOULD commit for those params, computed without writing. Persist it before\nthe submit; ``prompt.lookup_input`` later compares against it.",
+        "properties": {
+          "version": {
+            "const": "original-input-lookup-v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/CanonicalSessionRef"
+          },
+          "input_id": {
+            "title": "Input Id",
+            "type": "string"
+          },
+          "principal_binding": {
+            "title": "Principal Binding",
+            "type": "string"
+          },
+          "payload_fingerprint": {
+            "title": "Payload Fingerprint",
+            "type": "string"
+          },
+          "idle_fence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OriginalInputFence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "ref",
+          "input_id",
+          "principal_binding",
+          "payload_fingerprint",
+          "idle_fence"
+        ],
+        "title": "PreparedInputBinding",
         "type": "object"
       },
       "PreviewActRequestParams": {
@@ -32319,6 +32465,188 @@
           "admission_id"
         ],
         "title": "PromptCancelParams",
+        "type": "object"
+      },
+      "PromptLookupInputParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "input_id": {
+            "title": "Input Id",
+            "type": "string"
+          },
+          "payload_fingerprint": {
+            "title": "Payload Fingerprint",
+            "type": "string"
+          },
+          "idle_fence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CanonicalIdleFence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id",
+          "payload_fingerprint"
+        ],
+        "title": "PromptLookupInputParams",
+        "type": "object"
+      },
+      "PromptLookupInputResult": {
+        "additionalProperties": false,
+        "description": "``found``: an admission holds (this principal, session, ``input_id``); ``binding`` says whether\nits committed fingerprint AND fence equal the expected ones (``admission``/``proof`` only on\n``exact``). ``not_found``: nothing at that exact key NOW, never proof a submit was refused.\n``unavailable`` (``reason``): retired/draining/superseded owner or storage failure; proves nothing.",
+        "properties": {
+          "version": {
+            "const": "original-input-lookup-v1",
+            "title": "Version",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "found",
+              "not_found",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "runtime_retired",
+                  "runtime_draining",
+                  "stale_epoch",
+                  "storage_unavailable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/CanonicalSessionRef"
+          },
+          "input_id": {
+            "title": "Input Id",
+            "type": "string"
+          },
+          "principal_binding": {
+            "title": "Principal Binding",
+            "type": "string"
+          },
+          "binding": {
+            "anyOf": [
+              {
+                "enum": [
+                  "exact",
+                  "mismatch"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding"
+          },
+          "admission": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OriginalInputAdmission"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proof": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OriginalInputProof"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "settled": {
+            "title": "Settled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "state",
+          "reason",
+          "ref",
+          "input_id",
+          "principal_binding",
+          "binding",
+          "admission",
+          "proof",
+          "settled"
+        ],
+        "title": "PromptLookupInputResult",
+        "type": "object"
+      },
+      "PromptPrepareInputParams": {
+        "additionalProperties": false,
+        "description": "The same keys a machine ``prompt.submit`` of plain text sends (no attachments: capturing them\nwrites media). ``input_id`` is the exact original request id the submit will carry.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "input_id": {
+            "title": "Input Id",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "finite": {
+            "default": false,
+            "title": "Finite",
+            "type": "boolean"
+          },
+          "unattended": {
+            "default": false,
+            "title": "Unattended",
+            "type": "boolean"
+          },
+          "idle_fence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CanonicalIdleFence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id",
+          "text"
+        ],
+        "title": "PromptPrepareInputParams",
         "type": "object"
       },
       "PromptReceiptParams": {
@@ -48670,6 +48998,42 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/AdmissionStatus"
+        }
+      }
+    },
+    {
+      "name": "prompt.lookup_input",
+      "summary": "original-input-lookup-v1: read-only lookup of the caller's own admission at its exact original input_id; no prefix/trim/alias, no other principal, no write. not_found never proves a refusal.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptLookupInputParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PromptLookupInputResult"
+        }
+      }
+    },
+    {
+      "name": "prompt.prepare_input",
+      "summary": "original-input-lookup-v1: the binding (opaque principal, payload fingerprint, fence) the same prompt.submit params would commit, computed without writing. Needs a session live in this owner; no attach. Refusals: not_found, permission_denied, unsupported_control, invalid_params.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/PromptPrepareInputParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/PreparedInputBinding"
         }
       }
     },

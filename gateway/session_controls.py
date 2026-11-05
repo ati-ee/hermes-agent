@@ -95,7 +95,7 @@ _END_REASON = re.compile(r'[a-z][a-z_]{0,31}')
 # Verbs whose param sets are closed and never carried a ``profile`` key.
 _PROFILE_IMPLICIT = frozenset({'session.create', 'session.list', 'session.info', 'session.resume', 'session.detach',
                                'prompt.submit', 'prompt.receipt', 'prompt.cancel', 'prompt.resolve_unknown',
-                               'prompt.steer_queued', 'prompt.replace_queued',
+                               'prompt.steer_queued', 'prompt.replace_queued', 'prompt.prepare_input', 'prompt.lookup_input',
                                'session.interrupt', 'session.events.since', 'session.mutate', 'session.stats',
                                'approval.respond', 'clarify.respond'})
 
@@ -240,6 +240,8 @@ class AuthorityConnection:
         handlers.update(busy_handlers(self))
         from gateway.session_queued_controls import handlers as queued_handlers
         handlers.update(queued_handlers(self))
+        from gateway.session_input_lookup import handlers as input_lookup_handlers
+        handlers.update(input_lookup_handlers(self))
         from gateway.session_config import handlers as config_handlers
         handlers.update(config_handlers(self))
         from gateway.session_tui_config import handlers as tui_config_handlers
@@ -330,11 +332,13 @@ class AuthorityConnection:
         original_params = dict(params)
         contract = contract or METHODS.get(method)
         authority = self.authority
+        from gateway.session_input_lookup import ZERO_WRITE_METHODS
         if (isinstance(ref.session_id, str) and ref.session_id and not getattr(authority, 'retiring', False)
-                and ref.profile_id == getattr(authority, 'profile_id', None)
+                and ref.profile_id == getattr(authority, 'profile_id', None) and method not in ZERO_WRITE_METHODS
                 and ref.session_id not in getattr(authority, 'sessions', {ref.session_id: None})):
             # A first read of a session recovery never restored: its compression catch-up (#140060)
-            # commits in a worker here, so the handler's synchronous restore only reads.
+            # commits in a worker here, so the handler's synchronous restore only reads. The
+            # original-input-lookup-v1 verbs never restore, so they never commit a catch-up either.
             from gateway.session_local_adoption import adopt_before_restore
             await adopt_before_restore(authority, ref.session_id)
         handlers = self.handlers()
@@ -550,8 +554,11 @@ class AuthorityConnection:
                 'authority_epoch': self.authority.epoch,
                 # ``idle-admission-v1``: ``prompt.submit`` accepts ``idle_fence`` and ``session.resume``
                 # accepts ``metadata_only`` (gateway/session_authority.py::_idle_admission_guard).
+                # ``original-input-lookup-v1``: read-only ``prompt.prepare_input`` / ``prompt.lookup_input``
+                # (gateway/session_input_lookup.py).
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1',
-                                 'acp-session-mcp-v1', 'clarify-batch-v1', 'idle-admission-v1'],
+                                 'acp-session-mcp-v1', 'clarify-batch-v1', 'idle-admission-v1',
+                                 'original-input-lookup-v1'],
                 'session_create': {'sources': sorted(SURFACES),
                                    'parameters': sorted(CREATE_FIELDS | {'title'})},
                 # Main's ``gateway.ready.skin``: the canonical client's own ready carries it.
@@ -874,6 +881,11 @@ class AuthorityConnection:
         """The admission a ``prompt.submit``-shaped request asks for (``prompt.replace_queued`` too)."""
         if ref.session_id not in self.subscriptions:
             raise RuntimeStoreError('permission_denied')
+        return self.submission_request(ref, params)
+
+    def submission_request(self, ref, params):
+        """``submission`` without the attach check: also ``prompt.prepare_input``'s exact request, so a
+        prepared binding is computed from the very ``Submission`` the later submit builds."""
         forbidden = set(params) - {'session_id', 'text', 'submission_id', 'input_id', 'queued', 'attachments', 'finite', 'unattended',
                                    'surface', 'voice_context', 'interrupted', 'voice_turn', 'display_kind', 'title_preview',
                                    'turn_author', 'api_text', 'model_override', 'clarify_batch', 'idle_fence'}

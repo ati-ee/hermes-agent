@@ -751,56 +751,23 @@ class SessionAuthority:
 
     async def _submit(self, actor, request, *, _authorize_write=None, queue_only=False, _replay_guard=None,
                       _kanban_card=None):
-        fence = None
-        if isinstance(request.payload, dict) and 'idle_fence' in request.payload:
-            # ``idle-admission-v1``: idle-only, for THIS owner (never the restart wait's next owner),
-            # and only on an ordinary LOCAL route whose source is a frozen local policy.
-            fence = self._idle_fence(request.payload['idle_fence'])
-            from gateway.config import Platform
-            live_source = self.sessions[request.ref.session_id].source
-            if live_source is None or live_source.platform != Platform.LOCAL or _kanban_card is not None:
-                raise RuntimeStoreError('unsupported_control', field='idle_fence')
+        from gateway.session_input_lookup import committed_payload, submit_fence
+        # ``idle-admission-v1``: a fenced admission is idle-only, for THIS owner (never the restart wait's next owner).
+        fence = submit_fence(self, request, _kanban_card)
+        if fence is not None:
             queue_only = False
         self._require_admission_open(queue_only=queue_only)
-        if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
-                'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
-                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch',
-                'idle_fence'}
-                or not isinstance(request.payload['text'], str)):
-            raise RuntimeStoreError('invalid_params')
-        from gateway.session_ingress_media import admit_attachments
-        from gateway.session_finite import admit_finite
-        from gateway.session_surface import admit_surface
-        from gateway.session_display import admit_display
-        from gateway.session_cli_turn import admit_cli_turn
-        finite = admit_finite(request.payload)
         def admitted():
             # The exact durable identity (authenticated principal + target + request id); the
             # attachment fields it yields still pass the full payload-digest comparison below.
             from hermes_state_runtime import find_session_admission
             return find_session_admission(self.db, principal_id=actor.subject,
                                           session_id=request.ref.session_id, request_id=request.request_id)
-        payload = {'text': request.payload['text'], **finite, **admit_surface(request.payload),
-                   **admit_display(request.payload), **admit_cli_turn(request.payload),
-                   **admit_attachments(request.payload.get('attachments'), admitted=admitted)}
-        if _kanban_card is not None:
-            payload['kanban_card_v1'] = _kanban_card
+        # The one payload construction ``prompt.prepare_input`` shares (original-input-lookup-v1).
+        payload = committed_payload(self, actor, request, fence=fence, admitted=admitted, kanban_card=_kanban_card)
         if fence is not None:
-            # Committed in the payload, so the admission fingerprint binds it: an exact retry replays
-            # this admission, the same request id with another fence (or none) is admission_conflict.
-            payload['idle_fence_v1'] = fence
             _authorize_write = self._idle_admission_guard(request.ref.session_id, fence['expected_generation'],
                                                           _authorize_write)
-        source = self.sessions[request.ref.session_id].source
-        from gateway.owner_identity import same_owner
-        if source is not None and not same_owner(source.user_id, actor.subject):
-            # Durable server authorization, not a client payload field. The original
-            # principal remains the admission/retry identity across owner restarts.
-            # Operator provenance is about who was authorized at this boundary, not
-            # whether the bound session happens to use the LOCAL transport.
-            payload['local_operator_v1'] = {
-                'profile_id': self.profile_id, 'session_id': request.ref.session_id,
-                'principal_id': actor.subject}
         def admit():
             try:
                 return admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
