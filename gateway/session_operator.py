@@ -9,8 +9,9 @@ from gateway.owner_identity import same_owner
 from hermes_state_runtime import RuntimeStoreError
 
 # Fields ``SessionAuthority.submit`` commits for a local session's input; producers commit their own envelope.
+# ``idle_fence_v1``: the idle-admission-v1 fence the admission was accepted under (provenance only).
 LOCAL_INPUT_FIELDS = frozenset({'text', 'attachments_v1', 'finite', 'unattended', 'surface_v1', 'display_v1',
-                                'cli_turn_v1', 'kanban_card_v1'})
+                                'cli_turn_v1', 'kanban_card_v1', 'idle_fence_v1'})
 
 
 def is_viewer_input(row):
@@ -35,4 +36,8 @@ def check_local_input(authority, ref, row, *, source=None):
         if not same_owner(source.user_id, row['principal_id']):  # the rule submit() stamped by
             raise RuntimeStoreError('permission_denied')
     if not {'text'} <= set(payload) <= allowed:
+        raise RuntimeStoreError('permission_denied')
+    fence = payload.get('idle_fence_v1')
+    if fence is not None and (not isinstance(fence, dict) or set(fence) != {'expected_generation'}
+                              or type(fence['expected_generation']) is not int):
         raise RuntimeStoreError('permission_denied')

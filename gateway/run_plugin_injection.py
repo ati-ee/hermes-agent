@@ -109,6 +109,16 @@ class GatewayPluginInjectionMixin:
         future.add_done_callback(_log_result)
         return True
 
+    def _deliver_plugin_result(self, *, origin, content, delivery_id: str, plugin_id: str,
+                               plugin_home: Optional[Path] = None, timeout: float = 30.0,
+                               read_only: bool = False) -> dict:
+        """``PluginContext.deliver_result``/``delivery_receipt``: the origin conversation's durable
+        result row and receipt, committed (or read) before this returns; never a turn (thread-safe)."""
+        from gateway.plugin_result_delivery import deliver_threadsafe
+        return deliver_threadsafe(self, origin=origin, content=content, delivery_id=delivery_id,
+                                  plugin_id=plugin_id, plugin_home=plugin_home, timeout=timeout,
+                                  read_only=read_only)
+
     def _plugin_injection_accepting(self) -> bool:
         return getattr(self, "_running", False) and not getattr(self, "_draining", False)
 

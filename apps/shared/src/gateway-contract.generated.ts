@@ -5035,6 +5035,8 @@ export interface CanonicalSnapshot {
   display_messages?: TranscriptMessage[] | null
   message_count: number
   running: boolean
+  execution_state?: 'idle' | 'running' | 'waiting' | 'unknown' | 'terminal' | null
+  pending_count?: number | null
   authority_epoch: number
   replay_epoch: string
   last_sequence: number
@@ -5126,6 +5128,7 @@ export interface CanonicalResumeParams {
   omit_messages?: boolean
   cols?: number | null
   display_projection?: boolean
+  metadata_only?: boolean
 }
 export interface CanonicalListParams {
   profile?: string | null
@@ -5230,6 +5233,7 @@ export interface CanonicalSubmitParams {
   api_text?: string | null
   model_override?: CanonicalModelOverride | null
   clarify_batch?: boolean
+  idle_fence?: CanonicalIdleFence | null
 }
 export interface CanonicalAttachment {
   path: string
@@ -5245,6 +5249,10 @@ export interface CanonicalModelOverride {
   model: string
   provider?: string | null
   reasoning?: string | null
+}
+/** ``idle-admission-v1``: admit only if, inside the admission's own write transaction, the session is still at ``expected_generation`` (``execution_generation`` of the caller's observation) with nothing queued, started or unknown and no live worker. Else ``stale_generation``/``session_busy``. */
+export interface CanonicalIdleFence {
+  expected_generation: number
 }
 /** ``prompt.submit``: the admission receipt, or ``{voice_stopped: true}``. */
 export type CanonicalSubmitResult = AdmissionStatus | CanonicalVoiceStopped

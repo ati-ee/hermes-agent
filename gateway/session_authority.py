@@ -258,6 +258,44 @@ class SessionAuthority:
                 authorize(conn)
         return guard
 
+    def _idle_admission_guard(self, session_id, expected_generation, authorize=None):
+        """``idle-admission-v1``: the private guard of a NEW fenced admission. It runs inside the
+        admission's own SQLite write transaction (``admit_session_input``'s ``_authorize_write``,
+        after the exact-replay lookup and before the insert, again on every SQLite retry), so no
+        admission, claim or worker committed by anyone after the caller's observation can slip in
+        between this check and the insert. Refuses unless the session is still at the caller's
+        observed ``runtime_generation`` with nothing queued, started or unknown and no
+        registered/running/unknown worker on its lineage. The in-memory executing/settling check
+        can only refuse more, never admit. Exact replays never reach it: an accepted fenced
+        request still answers its own receipt after the session turned busy."""
+        def guard(conn):
+            if authorize is not None:
+                authorize(conn)
+            row = conn.execute('SELECT runtime_generation FROM sessions WHERE id=?', (session_id,)).fetchone()
+            if row is None:
+                raise RuntimeStoreError('not_found')
+            if row[0] != expected_generation:
+                exc = RuntimeStoreError('stale_generation', field='idle_fence.expected_generation')
+                exc.execution_generation = row[0]
+                raise exc
+            if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? "
+                            "AND status IN ('queued','started','unknown') LIMIT 1", (session_id,)).fetchone():
+                raise RuntimeStoreError('session_busy', field='idle_fence', detail='pending admission')
+            from hermes_state_runtime_workers import worker_states
+            if worker_states(conn, session_id):
+                raise RuntimeStoreError('session_busy', field='idle_fence', detail='live worker')
+            live = self.sessions.get(session_id)
+            if session_id in self.executing or (live is not None and live.settling):
+                raise RuntimeStoreError('session_busy', field='idle_fence', detail='settling')
+        return guard
+
+    @staticmethod
+    def _idle_fence(value):
+        if (not isinstance(value, dict) or set(value) != {'expected_generation'}
+                or type(value['expected_generation']) is not int or value['expected_generation'] < 0):
+            raise RuntimeStoreError('invalid_params', field='idle_fence')
+        return {'expected_generation': value['expected_generation']}
+
     def logical_owner(self, session_id):
         """The FIFO/admission identity of a route: the root of its compression lineage.
         Compression advances the physical transcript, never the admission identity. A session this
@@ -713,10 +751,21 @@ class SessionAuthority:
 
     async def _submit(self, actor, request, *, _authorize_write=None, queue_only=False, _replay_guard=None,
                       _kanban_card=None):
+        fence = None
+        if isinstance(request.payload, dict) and 'idle_fence' in request.payload:
+            # ``idle-admission-v1``: idle-only, for THIS owner (never the restart wait's next owner),
+            # and only on an ordinary LOCAL route whose source is a frozen local policy.
+            fence = self._idle_fence(request.payload['idle_fence'])
+            from gateway.config import Platform
+            live_source = self.sessions[request.ref.session_id].source
+            if live_source is None or live_source.platform != Platform.LOCAL or _kanban_card is not None:
+                raise RuntimeStoreError('unsupported_control', field='idle_fence')
+            queue_only = False
         self._require_admission_open(queue_only=queue_only)
         if (request.intent != 'queue' or not {'text'} <= set(request.payload) <= {
                 'text', 'attachments', 'finite', 'unattended', 'surface', 'voice_context', 'interrupted',
-                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch'}
+                'voice_turn', 'display_kind', 'title_preview', 'turn_author', 'api_text', 'model_override', 'clarify_batch',
+                'idle_fence'}
                 or not isinstance(request.payload['text'], str)):
             raise RuntimeStoreError('invalid_params')
         from gateway.session_ingress_media import admit_attachments
@@ -736,6 +785,12 @@ class SessionAuthority:
                    **admit_attachments(request.payload.get('attachments'), admitted=admitted)}
         if _kanban_card is not None:
             payload['kanban_card_v1'] = _kanban_card
+        if fence is not None:
+            # Committed in the payload, so the admission fingerprint binds it: an exact retry replays
+            # this admission, the same request id with another fence (or none) is admission_conflict.
+            payload['idle_fence_v1'] = fence
+            _authorize_write = self._idle_admission_guard(request.ref.session_id, fence['expected_generation'],
+                                                          _authorize_write)
         source = self.sessions[request.ref.session_id].source
         from gateway.owner_identity import same_owner
         if source is not None and not same_owner(source.user_id, actor.subject):

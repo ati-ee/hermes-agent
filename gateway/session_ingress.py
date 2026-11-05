@@ -4,6 +4,7 @@ import logging
 from contextvars import ContextVar
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
+from types import MappingProxyType
 
 from gateway.platforms.event import MessageEvent, ProcessingOutcome
 from gateway.session_envelope import restore_native
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 admission_author = ContextVar('admission_author', default=None)
 executing_admission = ContextVar('executing_admission', default=False)
+# ``invocation-origin-v1``: the claimed admission THIS turn executes, set by the drain from the
+# committed row and its live owner, never from the event, its text or a tool argument. Plugin tools
+# read it through ``PluginContext.invocation_origin``, sealed per plugin (hermes_cli/plugin_origin.py,
+# gateway/plugin_origin_seal.py); the unsealed mapping itself is no authority. Cron, managed
+# and noted (unviewed) admissions return before it is bound: they have no invocation origin.
+executing_origin: ContextVar = ContextVar('executing_origin', default=None)
 # The live session while the executing turn is one its viewer submitted (``is_viewer_input``), else None.
 viewer_turn: ContextVar = ContextVar('viewer_turn', default=None)
 # Set by a busy-path caller that must be released once its input is durably queued.
@@ -330,6 +337,9 @@ async def execute_admission(authority, ref, row):
     captured = {}
     result_token = execution_result.set(captured)
     token = executing_admission.set(True)
+    origin_token = executing_origin.set(MappingProxyType({
+        'profile_id': authority.profile_id, 'session_id': ref.session_id, 'route': route,
+        'admission_id': row['admission_id'], 'request_id': row['request_id'], 'generation': row['generation']}))
     # This drain, not the handler's unwind, releases the turn's crash marker (see below).
     event._turn_marker_handoff = True
     handed = False
@@ -387,6 +397,7 @@ async def execute_admission(authority, ref, row):
         if not handed:
             await _release_turn_marker(authority, event)
         executing_admission.reset(token)
+        executing_origin.reset(origin_token)
         execution_result.reset(result_token)
         api_execution.reset(api_token)
         admission_author.reset(author_token)

@@ -113,6 +113,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
 | Inject messages | `ctx.inject_message(content, role="user", session_key=... \| origin=...)` - see [Injecting Messages](#injecting-messages) |
 | Post and edit a status message | `handle = ctx.post_message(text)`, then `handle.edit(text)` — see [Posting a live message](#posting-a-live-message) |
+| Record a later result in the asking conversation | `ctx.invocation_origin()`, then `ctx.deliver_result(text, origin=..., delivery_id=...)` — see [Delivering a later result](#delivering-a-later-result-to-the-turn-that-asked-for-it) |
 | Ship data files | `Path(__file__).parent / "data" / "file.yaml"` |
 | Bundle skills | `ctx.register_skill(name, path)` — namespaced as `plugin:skill`, loaded via `skill_view("plugin:skill")` |
 | Gate on env vars | `requires_env: [API_KEY]` in plugin.yaml — prompted during `hermes plugins install` |
@@ -1108,6 +1109,67 @@ Only grant gateway injection to plugins you trust. Hermes checks this host API p
 :::note
 This plugin API does not expose a public HTTP endpoint or CLI command for external processes. The plugin must already know the target gateway `session_key`, for example from its own trusted configuration or previously retained session state.
 :::
+
+### Delivering a later result to the turn that asked for it
+
+A tool that starts long-running external work (a queued job, a remote build) can record its result
+later in **the conversation that asked for it**, exactly once, without starting a model turn:
+
+```python
+origin = ctx.invocation_origin()          # inside the tool call; None outside an admitted turn
+store_durably(job_id, origin.to_dict())  # the plugin's own ledger (the dict keeps the seal)
+
+# later, from a plugin thread (never the gateway loop):
+result = ctx.deliver_result(f"Job {job_id} finished: ...", origin=saved_dict,
+                            delivery_id=f"{job_id}:attempt-1")
+```
+
+**Signatures:** `ctx.invocation_origin() -> InvocationOrigin | None`,
+`ctx.deliver_result(content: str, *, origin: InvocationOrigin | dict, delivery_id: str, timeout: float = 30.0) -> dict` and
+`ctx.delivery_receipt(*, origin: InvocationOrigin | dict, delivery_id: str, timeout: float = 30.0) -> dict`
+(`InvocationOrigin` is in `hermes_cli.plugin_origin`). The plugin needs `allow_gateway_injection: true`
+(off by default); without it `invocation_origin()` returns `None`.
+
+- **The origin is sealed** (`hermes.plugin-origin/v1`). It names the profile, the session store, the
+  session, the route and the admitted input the turn runs (admission, request, generation), and it is
+  issued to the calling plugin. The gateway binds those fields when it starts the turn; they never come
+  from tool arguments, model text or environment variables. It seals them with HMAC-SHA256 under a
+  random per-store key kept in the store (`state_meta`), never in the origin.
+  - `to_dict()` keeps the seal, so a saved origin works after a restart against the same store.
+  - An origin rebuilt from plain fields, altered, or presented by another plugin, profile or store is
+    refused with `origin_unknown` before anything is read or written.
+  - The seal authenticates origins that crossed a serialization boundary. It does not sandbox
+    in-process plugin code: anything running in the gateway process as the same OS user can read the
+    store.
+  - Cron, managed-worker and other turns that do not run an admitted input have no origin.
+- **The result is a transcript row, not a turn** (`hermes.plugin-result/v1`). `deliver_result` appends
+  one visible row to the origin conversation's history, and that row is also the receipt. It shows as
+  a background-result card (`display_kind: async_delegation_complete`, metadata `plugin_result`).
+  - The receipt holds the delivery key, the content SHA-256, the message id and the origin admission.
+    Row and receipt are one insert in the store's writer transaction, keyed by the sealed origin plus
+    `delivery_id` (16–128 characters of `A-Z a-z 0-9 . _ : -`).
+  - The same pair with the same text returns the same receipt (`created: false`). This covers a lost
+    answer, a restart, or concurrent resends from any process; nothing is shown twice. The same pair
+    with other text is refused with `conflict`.
+  - No admission, claim or model turn is created. The next real turn reads the row as context, framed
+    as untrusted external data rather than user instructions. Attached live viewers get a
+    `notification.show` built from the stored row.
+  - The result is not posted to chat platforms such as Discord or Telegram: those sends are not
+    idempotent.
+- **Receipts survive `/new`.** After authentication, an existing receipt is found and replayed even if
+  the chat has since moved to another conversation. A new result for a moved chat is refused with
+  `origin_moved`.
+- **Other refusals** (`{"ok": false, "error": ...}`, nothing written):
+  - `not_allowed`: the grant is missing, or the chat no longer authorizes the plugin;
+  - `unsupported`: there is no gateway session authority;
+  - `busy`: a turn is running in that conversation, so resend later;
+  - `loop_thread`: the call came from the gateway loop itself;
+  - `unknown`: no answer arrived within `timeout`, so resend the same pair or read `delivery_receipt`.
+- `delivery_receipt` only reads: `{"ok": true, "found": false}` until that pair is recorded.
+- **Storage:** no schema migration. The row uses the existing `messages` columns, and the seal key is
+  one `state_meta` row created on first use.
+- In-process plugins only: like `post_message`, these are not available in the out-of-process plugin
+  host (`plugins.isolation: host`).
 
 ## Plugin code inside the gateway
 

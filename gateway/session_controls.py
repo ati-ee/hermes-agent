@@ -548,8 +548,10 @@ class AuthorityConnection:
         from gateway.session_skin import resolved_skin
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
                 'authority_epoch': self.authority.epoch,
+                # ``idle-admission-v1``: ``prompt.submit`` accepts ``idle_fence`` and ``session.resume``
+                # accepts ``metadata_only`` (gateway/session_authority.py::_idle_admission_guard).
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1',
-                                 'acp-session-mcp-v1', 'clarify-batch-v1'],
+                                 'acp-session-mcp-v1', 'clarify-batch-v1', 'idle-admission-v1'],
                 'session_create': {'sources': sorted(SURFACES),
                                    'parameters': sorted(CREATE_FIELDS | {'title'})},
                 # Main's ``gateway.ready.skin``: the canonical client's own ready carries it.
@@ -612,6 +614,12 @@ class AuthorityConnection:
 
     async def resume(self, ref, params):
         from gateway.session_local_inventory import snapshot_info
+        metadata_only = params.get('metadata_only', False)
+        if type(metadata_only) is not bool:
+            raise RuntimeStoreError('invalid_params', field='metadata_only')
+        if metadata_only:
+            return await self._metadata_attach(ref, params)
+        params = {key: value for key, value in params.items() if key != 'metadata_only'}
         replay_from = self.replay_cursors.pop(ref.session_id, None)
         requested = ref.session_id
         if 'latest' in params:
@@ -707,6 +715,48 @@ class AuthorityConnection:
                 'open_requests': open_requests(self.authority.sessions[snapshot.handle.ref.session_id].event_stream,
                                                snapshot.handle.ref.session_id)}
 
+    async def _metadata_attach(self, ref, params):
+        """``session.resume`` with ``metadata_only`` (``idle-admission-v1``): subscribe this connection
+        to one LIVE ordinary local session by its exact logical id, so a later ``prompt.submit`` with
+        an ``idle_fence`` may target it. Unlike a viewer resume it never restores or mounts a cold or
+        historic session, never resolves titles/latest/compression tips to another id, never
+        refreshes the session's policy, hooks or notices, and returns no transcript, no pending
+        input text and no prompts. ``running``/``execution_state``/``pending_count`` are an
+        observation only: the admission's own idle fence is what is atomic."""
+        if set(params) != {'session_id', 'metadata_only'} or not isinstance(ref.session_id, str) or not ref.session_id:
+            raise RuntimeStoreError('invalid_params', field='metadata_only',
+                                    detail='metadata_only takes the exact session_id only')
+        authority = self.authority
+        live = authority.sessions.get(ref.session_id)
+        if live is None:
+            raise RuntimeStoreError('not_found', field='session_id', detail='metadata_only attaches live sessions only')
+        # Main replaced ``superseded``/``history_mount``/``handed_off`` with ``detached`` and
+        # ``is_history_mount`` (29abd70464): neither a history mount nor a detached conversation qualifies.
+        from gateway.session_history_mount import is_history_mount
+        if (live.source is None or live.source.platform != Platform.LOCAL or is_history_mount(live)
+                or live.detached or authority.logical_owner(ref.session_id) != ref.session_id):
+            raise RuntimeStoreError('unsupported_control', field='session_id',
+                                    detail='metadata_only needs a live ordinary local session')
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(authority.runner, live.source)  # a missing frozen policy refuses here
+        snapshot = await authority.attach(self.actor, ref)
+        self.subscriptions[ref.session_id] = snapshot.subscription_id
+        self.handed_back.discard(ref.session_id)
+        row = await asyncio.to_thread(authority.db.get_session, ref.session_id) or {}
+        return {'session_id': ref.session_id, 'stored_session_id': ref.session_id,
+                'messages': [], 'message_count': len(snapshot.history),
+                'running': snapshot.handle.execution_state == 'running',
+                'execution_state': snapshot.handle.execution_state,
+                'pending_count': len(snapshot.pending),
+                'authority_epoch': snapshot.handle.authority_epoch,
+                'replay_epoch': snapshot.replay_epoch, 'last_sequence': snapshot.last_sequence,
+                'subscription_id': snapshot.subscription_id, 'revision': snapshot.handle.revision,
+                'execution_generation': snapshot.handle.execution_generation,
+                'pending': [], 'prompts': [],
+                'info': {'desktop_protocol': CANONICAL_GATEWAY_PROTOCOL, 'source': row.get('source'),
+                         'profile_id': authority.profile_id,
+                         'yolo': bool(policy is not None and getattr(policy, 'yolo', False))}}
+
     def _spawn_notice(self, ref):
         """Low-disk auto-prune question for this viewer, off the resume reply's path."""
         from gateway.run_housekeeping_disk import publish_local_auto_prune_notice
@@ -755,6 +805,12 @@ class AuthorityConnection:
         return {**replay, 'open_requests': open_requests(stream, ref.session_id)}
 
     async def submit(self, ref, params):
+        if 'idle_fence' in params:
+            # ``idle-admission-v1``: a machine admission that must find THIS owner idle. It is never
+            # consumed as a typed/spoken stop phrase and never rides a restart's after-turn wait
+            # (``queue_while_restarting``): the next owner did not observe the fenced generation.
+            receipt = await self.authority.submit(self.actor, self.submission(ref, params))
+            return asdict(receipt)
         if self._voice_stop_replay(ref, params) or await self._typed_voice_stop(ref, params):
             self._record_voice_stop(ref, params)
             return {'voice_stopped': True}
@@ -820,7 +876,7 @@ class AuthorityConnection:
             raise RuntimeStoreError('permission_denied')
         forbidden = set(params) - {'session_id', 'text', 'submission_id', 'input_id', 'queued', 'attachments', 'finite', 'unattended',
                                    'surface', 'voice_context', 'interrupted', 'voice_turn', 'display_kind', 'title_preview',
-                                   'turn_author', 'api_text', 'model_override', 'clarify_batch'}
+                                   'turn_author', 'api_text', 'model_override', 'clarify_batch', 'idle_fence'}
         if forbidden:
             raise RuntimeStoreError('invalid_params')
         request_id = params.get('submission_id') or params.get('input_id')
@@ -834,6 +890,9 @@ class AuthorityConnection:
                    **submit_display_fields(params), **submit_cli_turn_fields(params)}
         if 'attachments' in params:
             payload['attachments'] = params['attachments']
+        if 'idle_fence' in params:
+            # Validated (shape, LOCAL route) and committed as ``idle_fence_v1`` by ``SessionAuthority._submit``.
+            payload['idle_fence'] = params['idle_fence']
         return Submission(request_id, ref, payload, 'queue')
 
     async def mutate(self, ref, params):

@@ -4,6 +4,7 @@ SessionDB through ``SessionMessagesMixin``; built on its _message_row_params/_ex
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -16,6 +17,19 @@ _LINEAGE_MATCH_SQL = """WITH RECURSIVE lineage(id) AS (SELECT ? UNION
 ) SELECT m.id FROM messages m JOIN lineage l ON m.session_id = l.id WHERE """
 _DELEGATION_DELIVERY_MATCH = ("m.display_kind IN ('async_delegation_complete', 'hidden') AND json_extract(m.display_metadata, "
                               "'$.delegation_id') = ? AND coalesce(json_extract(m.display_metadata, '$.delivery_notice'), '') = ?")
+
+_PLUGIN_RESULT_MATCH = ("m.display_kind = 'async_delegation_complete' AND "
+                        "json_extract(m.display_metadata, '$.plugin_result.delivery_key') = ?")
+
+
+def _plugin_result_row(conn, session_id: str, delivery_key: str) -> dict[str, Any] | None:
+    found = conn.execute(_LINEAGE_MATCH_SQL + _PLUGIN_RESULT_MATCH + " LIMIT 1", (session_id, delivery_key)).fetchone()
+    if found is None:
+        return None
+    row = conn.execute("SELECT id, session_id, message_uid, timestamp, content, display_metadata FROM messages "
+                       "WHERE id = ?", (found[0],)).fetchone()
+    return {"message_id": row[0], "session_id": row[1], "message_uid": row[2], "timestamp": row[3],
+            "content": row[4], "plugin_result": json.loads(row[5])["plugin_result"]}
 
 
 class SessionDetachedResultsMixin:
@@ -36,6 +50,35 @@ class SessionDetachedResultsMixin:
         return self._append_detached_result(
             session_id, content, display_kind, {**metadata, "completion_admission": admission_id},
             "json_extract(m.display_metadata, '$.completion_admission') = ?", (admission_id,))
+
+    def find_plugin_result(self, session_id: str, delivery_key: str) -> dict[str, Any] | None:
+        """The plugin result recorded under *delivery_key* in *session_id*'s compression lineage, read-only."""
+        with self._read_ctx() as conn:
+            return _plugin_result_row(conn, session_id, delivery_key)
+
+    def append_plugin_result(self, session_id: str, delivery_key: str, content: str, api_content: str,
+                             display_text: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        """Record a plugin's late result as ONE visible transcript row that is also its receipt, once per
+        *delivery_key* (``gateway/plugin_result_delivery.py``). Lookup and insert share the writer
+        transaction: concurrent or repeated calls in any process return the first row (``created``
+        False) with its stored ``content_sha256``, which the caller compares. No turn is admitted."""
+        from hermes_state_messages import _INSERT_MESSAGE_SQL  # that module binds this mixin
+        metadata = {"display_text": display_text, "plugin_result": {**receipt, "delivery_key": delivery_key}}
+        msg = {"content": content, "api_content": api_content, "display_kind": "async_delegation_complete",
+               "display_metadata": metadata}
+        stamp_message_uid(msg)
+        row = self._message_row_params(session_id, "user", msg, None, time.time(), keep_reasoning=True)
+
+        def _do(conn):
+            existing = _plugin_result_row(conn, session_id, delivery_key)
+            if existing is not None:
+                return {**existing, "created": False}
+            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True)
+            conn.execute(_INSERT_MESSAGE_SQL, row)
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            return {**_plugin_result_row(conn, session_id, delivery_key), "created": True}
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def _append_detached_result(self, session_id: str, content: str, display_kind: str, metadata: dict[str, Any],
                                 match_sql: str, params: tuple) -> int:

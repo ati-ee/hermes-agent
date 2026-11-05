@@ -57,7 +57,7 @@ from hermes_cli.plugins_dispatch import (
     RenderedPluginSystemPromptSection, _EventSubscription, format_system_prompt_sections,
     is_valid_system_prompt_section_id, resolve_plugin_command_result,
 )
-from hermes_cli.plugins_capability_ctx import PluginCapabilityCtxMixin
+from hermes_cli.plugins_capability_ctx import PluginCapabilityCtxMixin, PluginOriginCtxMixin
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_registrars import _SCOPED_PROVIDER_REGISTRARS, make_scoped_provider_registrar
 from hermes_cli.plugins_state import (
@@ -227,7 +227,7 @@ class LoadedPlugin:
     deferred: bool = False
 
 
-class PluginContext(PluginCapabilityCtxMixin):
+class PluginContext(PluginCapabilityCtxMixin, PluginOriginCtxMixin):
     """Facade given to plugins so they can register tools and hooks."""
 
     def __init__(self, manifest: PluginManifest, manager: PluginManager):

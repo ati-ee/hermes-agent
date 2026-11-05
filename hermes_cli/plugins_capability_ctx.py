@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 from hermes_cli.plugin_capabilities import plugin_capability_granted
+from hermes_cli.plugin_origin import PluginOriginCtxMixin  # re-exported: PluginContext's base (hermes_cli/plugins.py)
 from hermes_cli.plugins_loader import _plugin_home_scope
 
 logger = logging.getLogger(__name__)

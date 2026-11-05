@@ -8932,6 +8932,21 @@
         "title": "CanonicalEventsResult",
         "type": "object"
       },
+      "CanonicalIdleFence": {
+        "additionalProperties": false,
+        "description": "``idle-admission-v1``: admit only if, inside the admission's own write transaction, the session\nis still at ``expected_generation`` (``execution_generation`` of the caller's observation) with\nnothing queued, started or unknown and no live worker. Else ``stale_generation``/``session_busy``.",
+        "properties": {
+          "expected_generation": {
+            "title": "Expected Generation",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_generation"
+        ],
+        "title": "CanonicalIdleFence",
+        "type": "object"
+      },
       "CanonicalListParams": {
         "additionalProperties": false,
         "properties": {
@@ -9713,6 +9728,11 @@
           "display_projection": {
             "default": false,
             "title": "Display Projection",
+            "type": "boolean"
+          },
+          "metadata_only": {
+            "default": false,
+            "title": "Metadata Only",
             "type": "boolean"
           }
         },
@@ -10568,6 +10588,37 @@
             "title": "Running",
             "type": "boolean"
           },
+          "execution_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "idle",
+                  "running",
+                  "waiting",
+                  "unknown",
+                  "terminal"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execution State"
+          },
+          "pending_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pending Count"
+          },
           "authority_epoch": {
             "title": "Authority Epoch",
             "type": "integer"
@@ -11357,6 +11408,17 @@
             "default": false,
             "title": "Clarify Batch",
             "type": "boolean"
+          },
+          "idle_fence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CanonicalIdleFence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [

@@ -4,7 +4,7 @@ Reuse upstream authority-only value shapes; these overrides do not widen METHODS
 """
 from typing import Literal
 
-from pydantic import RootModel
+from pydantic import RootModel, StrictInt
 
 from .base import JsonValue, Params, Result
 from .common import ProfileParams, TranscriptMessage
@@ -72,6 +72,10 @@ class CanonicalResumeParams(ProfileParams):
     # A renderer (the Ink TUI) asks for main's display projection of the same rows
     # (``tui_gateway.session_history._history_to_messages``) as ``display_messages``.
     display_projection: bool = False
+    # ``idle-admission-v1``: attach this connection to one LIVE ordinary local session by its exact
+    # id for a later idle-fenced ``prompt.submit``. No transcript/pending text/prompts in the reply,
+    # no cold restore, no policy refresh; any other key alongside it is ``invalid_params``.
+    metadata_only: bool = False
 
 
 class CanonicalSessionHandle(Result):
@@ -144,6 +148,10 @@ class CanonicalSnapshot(Result):
     display_messages: list[TranscriptMessage] | None = None
     message_count: int
     running: bool
+    # ``metadata_only`` replies only (``idle-admission-v1``): the handle's execution state and how many
+    # admissions are pending, never their text. An observation; the idle fence is what is atomic.
+    execution_state: Literal['idle', 'running', 'waiting', 'unknown', 'terminal'] | None = None
+    pending_count: int | None = None
     authority_epoch: int
     replay_epoch: str
     last_sequence: int
@@ -206,6 +214,14 @@ class CanonicalModelOverride(Params):
     reasoning: str | None = None
 
 
+class CanonicalIdleFence(Params):
+    """``idle-admission-v1``: admit only if, inside the admission's own write transaction, the session
+    is still at ``expected_generation`` (``execution_generation`` of the caller's observation) with
+    nothing queued, started or unknown and no live worker. Else ``stale_generation``/``session_busy``."""
+
+    expected_generation: StrictInt
+
+
 class CanonicalSubmitParams(CanonicalSessionParams):
     text: str
     submission_id: str | None = None
@@ -232,6 +248,8 @@ class CanonicalSubmitParams(CanonicalSessionParams):
     # The submitter answers the clarify tool's whole batch in one ``clarify`` server request (main's
     # batch panel); without it the turn's viewers get one ``clarify.request`` card per question.
     clarify_batch: bool = False
+    # ``idle-admission-v1`` (LOCAL routes only): see ``CanonicalIdleFence``.
+    idle_fence: CanonicalIdleFence | None = None
 
 
 class CanonicalVoiceStopped(Result):
